@@ -3,22 +3,35 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 
+import { buildIceServers } from "@/lib/webrtc/ice";
 import { createClient } from "@/utils/supabase/client";
 
 /**
- * STUN público de Google. Suficiente para la mayoría de redes domésticas.
+ * Configuración ICE. Las referencias a process.env tienen que ser literales
+ * para que Next las inyecte en el bundle del navegador en tiempo de build.
  *
- * OJO: sin un servidor TURN, los usuarios tras NAT simétrico (muchas redes
- * móviles y corporativas) no llegarán nunca a conectar. Hay que añadir TURN
- * antes de abrir esto al público.
+ * ADVERTENCIA DE SEGURIDAD: al ser NEXT_PUBLIC_*, la credencial del TURN viaja
+ * al navegador en texto plano y cualquiera puede extraerla del bundle y usar el
+ * servidor por su cuenta (te comes tú el ancho de banda). Para producción, lo
+ * correcto son credenciales efímeras firmadas en el servidor (coturn con
+ * `use-auth-secret` y HMAC con caducidad).
  */
-const ICE_SERVERS: RTCIceServer[] = [
-  {
-    urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"],
-  },
-];
+const { iceServers: ICE_SERVERS, turnEnabled: TURN_ENABLED } = buildIceServers({
+  urls: process.env.NEXT_PUBLIC_TURN_URLS,
+  username: process.env.NEXT_PUBLIC_TURN_USERNAME,
+  credential: process.env.NEXT_PUBLIC_TURN_CREDENTIAL,
+});
 
 const SIGNAL_EVENT = "signal";
+
+/**
+ * `disconnected` en ICE suele ser un bache pasajero de red (wifi, cambio de
+ * celda) del que la conexión se recupera sola. Solo lo damos por perdido si
+ * persiste: abortar un duelo por un parpadeo de dos segundos sería peor.
+ */
+const DISCONNECT_GRACE_MS = 5000;
+
+const NETWORK_ERROR_MESSAGE = "Conexión de red fallida o rival desconectado.";
 
 type SignalMessage =
   | { kind: "offer"; sdp: RTCSessionDescriptionInit }
@@ -39,6 +52,8 @@ type UseWebRTCArgs = {
 type UseWebRTCResult = {
   remoteStream: MediaStream | null;
   status: PeerStatus;
+  /** Mensaje si la conexión se cae de forma irrecuperable; null si todo va bien. */
+  networkError: string | null;
 };
 
 /**
@@ -56,6 +71,7 @@ export function useWebRTC({
   const supabase = useMemo(() => createClient(), []);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [status, setStatus] = useState<PeerStatus>("idle");
+  const [networkError, setNetworkError] = useState<string | null>(null);
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const channelRef = useRef<RealtimeChannel | null>(null);
@@ -73,8 +89,27 @@ export function useWebRTC({
      */
     const pendingCandidates: RTCIceCandidateInit[] = [];
 
+    if (TURN_ENABLED) {
+      console.info(
+        `Inicializando WebRTC con soporte TURN (${ICE_SERVERS.length} servidores ICE).`,
+      );
+    } else {
+      console.warn(
+        "Inicializando WebRTC solo con STUN: los usuarios tras NAT simétrico (redes móviles y corporativas) no podrán conectar. Configura NEXT_PUBLIC_TURN_URLS, NEXT_PUBLIC_TURN_USERNAME y NEXT_PUBLIC_TURN_CREDENTIAL.",
+      );
+    }
+
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     pcRef.current = pc;
+
+    /** Timer de gracia para el estado `disconnected` de ICE. */
+    let disconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const clearDisconnectTimer = () => {
+      if (disconnectTimer === null) return;
+      clearTimeout(disconnectTimer);
+      disconnectTimer = null;
+    };
 
     const channel = supabase.channel(`room-${matchId}`, {
       config: {
@@ -124,6 +159,34 @@ export function useWebRTC({
           break;
         case "failed":
           setStatus("failed");
+          break;
+      }
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      if (disposed) return;
+
+      switch (pc.iceConnectionState) {
+        case "connected":
+        case "completed":
+          // Se recuperó sola: retiramos el aviso.
+          clearDisconnectTimer();
+          setNetworkError(null);
+          setStatus("connected");
+          break;
+
+        case "failed":
+          // ICE agotó todos los candidatos: no hay ruta posible.
+          clearDisconnectTimer();
+          setStatus("failed");
+          setNetworkError(NETWORK_ERROR_MESSAGE);
+          break;
+
+        case "disconnected":
+          setStatus("disconnected");
+          disconnectTimer ??= setTimeout(() => {
+            if (!disposed) setNetworkError(NETWORK_ERROR_MESSAGE);
+          }, DISCONNECT_GRACE_MS);
           break;
       }
     };
@@ -232,9 +295,12 @@ export function useWebRTC({
 
       // Quitar los listeners antes de cerrar para que no disparen sobre una
       // conexión muerta.
+      clearDisconnectTimer();
+
       pc.ontrack = null;
       pc.onicecandidate = null;
       pc.onconnectionstatechange = null;
+      pc.oniceconnectionstatechange = null;
 
       for (const sender of pc.getSenders()) {
         try {
@@ -255,8 +321,9 @@ export function useWebRTC({
 
       setRemoteStream(null);
       setStatus("idle");
+      setNetworkError(null);
     };
   }, [supabase, matchId, userId, isInitiator, localStream]);
 
-  return { remoteStream, status };
+  return { remoteStream, status, networkError };
 }

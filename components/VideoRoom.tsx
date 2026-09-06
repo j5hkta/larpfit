@@ -11,6 +11,7 @@ import {
   ShieldAlert,
   Skull,
   Video,
+  WifiOff,
 } from "lucide-react";
 
 import { useMatchOutcome } from "@/hooks/useMatchOutcome";
@@ -43,9 +44,8 @@ const PEER_COPY: Record<string, string> = {
   waiting: "Esperando a que entre tu rival…",
   connecting: "Conectando peer-to-peer…",
   connected: "Conectado",
-  disconnected: "Se ha perdido la conexión con tu rival.",
-  failed:
-    "No se pudo establecer la conexión. Puede que tu red necesite un servidor TURN.",
+  disconnected: "Reconectando…",
+  failed: "Conexión de red fallida o rival desconectado.",
 };
 
 /** El navegador no expone mediaDevices fuera de un contexto seguro. */
@@ -197,12 +197,23 @@ export function VideoRoom({
   const cameraReady = camera.status === "ready";
 
   // --- Conexión peer-to-peer ------------------------------------------------
-  const { remoteStream, status: peerStatus } = useWebRTC({
+  const {
+    remoteStream,
+    status: peerStatus,
+    networkError,
+  } = useWebRTC({
     matchId,
     userId,
     isInitiator,
     localStream,
   });
+
+  // Se cayó la red: apagamos la cámara igual que al terminar un duelo. Dejar
+  // la webcam encendida sobre una pantalla de error es un bug crítico.
+  useEffect(() => {
+    if (!networkError) return;
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+  }, [networkError]);
 
   useEffect(() => {
     const element = remoteVideoRef.current;
@@ -263,7 +274,7 @@ export function VideoRoom({
   // --- Cronómetro de 15 s ---------------------------------------------------
   // Arranca solo cuando los dos están conectados de verdad.
   useEffect(() => {
-    if (peerStatus !== "connected" || duelEnded) return;
+    if (peerStatus !== "connected" || duelEnded || networkError) return;
 
     resetSamples();
     const startedAt = Date.now();
@@ -283,7 +294,38 @@ export function VideoRoom({
     }, 200);
 
     return () => clearInterval(interval);
-  }, [peerStatus, duelEnded, resetSamples, finishDuel]);
+  }, [peerStatus, duelEnded, networkError, resetSamples, finishDuel]);
+
+  // --- Pantalla de red caída -------------------------------------------------
+  // Va antes que la de resultado: si el duelo ya terminó y la puntuación se
+  // envió, el veredicto manda aunque luego se caiga la conexión.
+  if (networkError && !duelEnded) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-6 px-4 py-12 text-center">
+        <WifiOff aria-hidden className="size-14 text-flex-400" />
+
+        <h1 className="text-3xl font-black uppercase tracking-tight text-white">
+          Duelo interrumpido
+        </h1>
+
+        <p role="alert" className="max-w-sm text-sm text-arena-300">
+          {networkError}
+        </p>
+
+        <p className="max-w-sm text-xs text-arena-500">
+          Si te pasa a menudo, puede que tu red necesite un servidor TURN.
+        </p>
+
+        <button
+          type="button"
+          onClick={onLeave}
+          className="mt-2 rounded-lg bg-volt-500 px-8 py-4 text-sm font-black uppercase tracking-widest text-arena-950 transition-colors hover:bg-volt-400"
+        >
+          Buscar otro rival
+        </button>
+      </div>
+    );
+  }
 
   // --- Pantalla de resultado -------------------------------------------------
   if (duelEnded) {
