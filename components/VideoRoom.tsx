@@ -5,9 +5,13 @@ import {
   CameraOff,
   Loader2,
   RefreshCw,
+  ScanLine,
   ShieldAlert,
   Video,
 } from "lucide-react";
+
+import { usePoseDetector } from "@/hooks/usePoseDetector";
+import { useWebRTC } from "@/hooks/useWebRTC";
 
 type CameraState =
   | { status: "requesting" }
@@ -20,9 +24,20 @@ type CameraState =
 
 type VideoRoomProps = {
   matchId: string;
+  userId: string;
   isInitiator: boolean;
   opponentUsername: string | null;
   onLeave: () => void;
+};
+
+const PEER_COPY: Record<string, string> = {
+  idle: "Preparando la conexión…",
+  waiting: "Esperando a que entre tu rival…",
+  connecting: "Conectando peer-to-peer…",
+  connected: "Conectado",
+  disconnected: "Se ha perdido la conexión con tu rival.",
+  failed:
+    "No se pudo establecer la conexión. Puede que tu red necesite un servidor TURN.",
 };
 
 /** El navegador no expone mediaDevices fuera de un contexto seguro. */
@@ -82,23 +97,24 @@ const CAMERA_COPY: Record<
 };
 
 /**
- * Sala del duelo.
+ * Sala del duelo: cámara local, conexión P2P con el rival y análisis de pose.
  *
- * Fase 3: solo cámara local + maquetación. El WebRTC (offer/answer SDP, ICE y
- * señalización por Supabase Realtime) y la cuenta atrás de 15 s llegan en la
- * Fase 4; `isInitiator` ya viene resuelto para entonces.
+ * Falta la cuenta atrás de 15 s y el veredicto del juez (Fase 5).
  */
 export function VideoRoom({
   matchId,
+  userId,
   isInitiator,
   opponentUsername,
   onLeave,
 }: VideoRoomProps) {
   const [camera, setCamera] = useState<CameraState>({ status: "requesting" });
   const [attempt, setAttempt] = useState(0);
+  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
 
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
+  const poseCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
   useEffect(() => {
@@ -138,6 +154,8 @@ export function VideoRoom({
           localVideo.srcObject = mediaStream;
         }
 
+        // El stream va al estado para que useWebRTC pueda añadir sus pistas.
+        setLocalStream(mediaStream);
         setCamera({ status: "ready" });
       })
       .catch((error: unknown) => {
@@ -155,6 +173,8 @@ export function VideoRoom({
       if (localVideo) {
         localVideo.srcObject = null;
       }
+
+      setLocalStream(null);
     };
   }, [attempt]);
 
@@ -164,6 +184,32 @@ export function VideoRoom({
   }, []);
 
   const cameraReady = camera.status === "ready";
+
+  // --- Conexión peer-to-peer ------------------------------------------------
+  const { remoteStream, status: peerStatus } = useWebRTC({
+    matchId,
+    userId,
+    isInitiator,
+    localStream,
+  });
+
+  useEffect(() => {
+    const element = remoteVideoRef.current;
+    if (!element) return;
+
+    element.srcObject = remoteStream;
+
+    return () => {
+      element.srcObject = null;
+    };
+  }, [remoteStream]);
+
+  // --- Juez de IA (solo sobre nuestra propia cámara) ------------------------
+  const { status: poseStatus, torso } = usePoseDetector({
+    videoRef: localVideoRef,
+    canvasRef: poseCanvasRef,
+    enabled: cameraReady,
+  });
 
   return (
     <div className="flex flex-1 flex-col gap-4 p-4">
@@ -179,6 +225,18 @@ export function VideoRoom({
         </div>
 
         <div className="flex items-center gap-3">
+          <span
+            aria-live="polite"
+            className={`rounded-full border px-3 py-1 text-xs uppercase tracking-wider ${
+              peerStatus === "connected"
+                ? "border-volt-500/50 text-volt-400"
+                : peerStatus === "failed" || peerStatus === "disconnected"
+                  ? "border-flex-500/50 text-flex-400"
+                  : "border-arena-700 text-arena-300"
+            }`}
+          >
+            {PEER_COPY[peerStatus]}
+          </span>
           <span className="rounded-full border border-arena-700 px-3 py-1 text-xs uppercase tracking-wider text-arena-300">
             {isInitiator ? "Anfitrión" : "Invitado"}
           </span>
@@ -245,22 +303,66 @@ export function VideoRoom({
             </div>
           )}
 
+          {/* Esqueleto de MediaPipe. Va espejado igual que el vídeo para que
+              los puntos caigan sobre el cuerpo y no invertidos. */}
+          <canvas
+            ref={poseCanvasRef}
+            aria-hidden
+            className={`pointer-events-none absolute inset-0 size-full -scale-x-100 object-cover transition-opacity ${
+              cameraReady ? "opacity-100" : "opacity-0"
+            }`}
+          />
+
           <span className="absolute bottom-3 left-3 rounded-md bg-arena-950/80 px-2 py-1 text-xs font-semibold uppercase tracking-wider text-volt-400">
             Tú
           </span>
+
+          {cameraReady && (
+            <div
+              aria-live="polite"
+              className="absolute bottom-3 right-3 flex items-center gap-2 rounded-md bg-arena-950/85 px-2.5 py-1.5 text-xs"
+            >
+              <ScanLine
+                aria-hidden
+                className={`size-3.5 ${
+                  poseStatus === "detecting"
+                    ? "text-volt-400"
+                    : "text-arena-500"
+                }`}
+              />
+              {poseStatus === "detecting" && torso ? (
+                <span className="font-mono tabular-nums text-volt-400">
+                  V-taper {torso.ratio.toFixed(2)}
+                </span>
+              ) : (
+                <span className="text-arena-300">
+                  {poseStatus === "loading"
+                    ? "Cargando el juez…"
+                    : poseStatus === "error"
+                      ? "Juez no disponible"
+                      : "Ponte de cuerpo entero"}
+                </span>
+              )}
+            </div>
+          )}
         </section>
 
-        {/* --- Vídeo remoto (Fase 4: WebRTC) --- */}
+        {/* --- Vídeo remoto (WebRTC P2P) --- */}
         <section className="relative flex min-h-[38vh] items-center justify-center overflow-hidden rounded-2xl border border-arena-700/70 bg-arena-900 md:min-h-0">
-          {/* La Fase 4 asignará aquí el MediaStream remoto que llegue por WebRTC. */}
           <video
             ref={remoteVideoRef}
             autoPlay
             playsInline
-            className="absolute inset-0 size-full object-cover opacity-0"
+            className={`absolute inset-0 size-full object-cover transition-opacity ${
+              remoteStream ? "opacity-100" : "opacity-0"
+            }`}
           />
 
-          <div className="relative flex flex-col items-center gap-3 px-6 text-center">
+          <div
+            className={`relative flex flex-col items-center gap-3 px-6 text-center ${
+              remoteStream ? "hidden" : ""
+            }`}
+          >
             {cameraReady ? (
               <Video aria-hidden className="size-8 text-arena-500" />
             ) : (
@@ -273,7 +375,7 @@ export function VideoRoom({
               </span>
             </p>
             <p className="text-xs uppercase tracking-widest text-arena-500">
-              Fase 4 · conexión WebRTC
+              {PEER_COPY[peerStatus]}
             </p>
           </div>
 

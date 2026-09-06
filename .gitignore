@@ -40,3 +40,6 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 !.env.example
+
+# assets de MediaPipe copiados desde node_modules (scripts/copy-mediapipe.mjs)
+/public/mediapipe

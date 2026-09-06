@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Assets de MediaPipe copiados desde node_modules: no son código nuestro.
+    "public/mediapipe/**",
   ]),
 ]);
 

@@ -68,6 +68,7 @@ export function Matchmaker({ userId, username, country }: MatchmakerProps) {
     return (
       <VideoRoom
         matchId={state.match.id}
+        userId={userId}
         isInitiator={state.match.isInitiator}
         opponentUsername={state.match.opponentUsername}
         onLeave={handleRetry}

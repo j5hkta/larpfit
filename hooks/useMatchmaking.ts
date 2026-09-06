@@ -9,6 +9,13 @@ import type { MatchRow, MatchmakingState } from "@/types/match";
 /** Red de seguridad por si Realtime no entrega el INSERT (ms). */
 const POLL_INTERVAL_MS = 4000;
 
+/**
+ * Latido de la cola. Desde 00002 el servidor barre las filas con más de 30 s
+ * sin refrescar, así que un cliente vivo TIENE que avisar de que sigue ahí o
+ * lo echarán de la cola sin haber jugado.
+ */
+const HEARTBEAT_MS = 10000;
+
 type UseMatchmakingResult = {
   state: MatchmakingState;
   cancel: () => Promise<void>;
@@ -197,6 +204,17 @@ export function useMatchmaking(
 
     return () => clearInterval(interval);
   }, [state.status, supabase, userId, resolveMatch]);
+
+  // --- Latido mientras esperamos en la cola ---------------------------------
+  useEffect(() => {
+    if (state.status !== "searching") return;
+
+    const interval = setInterval(() => {
+      void supabase.rpc("heartbeat_queue");
+    }, HEARTBEAT_MS);
+
+    return () => clearInterval(interval);
+  }, [state.status, supabase]);
 
   // --- Cancelar -------------------------------------------------------------
   const cancel = useCallback(async () => {
