@@ -128,7 +128,32 @@ export function VideoRoom({
   const poseCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
+  // --- Conexión peer-to-peer ------------------------------------------------
+  const {
+    remoteStream,
+    status: peerStatus,
+    networkError,
+    iceReady,
+    iceError,
+  } = useWebRTC({
+    matchId,
+    userId,
+    isInitiator,
+    localStream,
+  });
+
+  // Se cayó la red: apagamos la cámara igual que al terminar un duelo. Dejar
+  // la webcam encendida sobre una pantalla de error es un bug crítico.
   useEffect(() => {
+    if (!networkError) return;
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+  }, [networkError]);
+
+  useEffect(() => {
+    // No pedimos la cámara hasta tener servidores ICE: encender la webcam para
+    // luego descubrir que la negociación es imposible es mal comportamiento.
+    if (!iceReady) return;
+
     let cancelled = false;
     let stream: MediaStream | null = null;
 
@@ -187,7 +212,7 @@ export function VideoRoom({
 
       setLocalStream(null);
     };
-  }, [attempt]);
+  }, [attempt, iceReady]);
 
   const retryCamera = useCallback(() => {
     setCamera({ status: "requesting" });
@@ -195,25 +220,6 @@ export function VideoRoom({
   }, []);
 
   const cameraReady = camera.status === "ready";
-
-  // --- Conexión peer-to-peer ------------------------------------------------
-  const {
-    remoteStream,
-    status: peerStatus,
-    networkError,
-  } = useWebRTC({
-    matchId,
-    userId,
-    isInitiator,
-    localStream,
-  });
-
-  // Se cayó la red: apagamos la cámara igual que al terminar un duelo. Dejar
-  // la webcam encendida sobre una pantalla de error es un bug crítico.
-  useEffect(() => {
-    if (!networkError) return;
-    streamRef.current?.getTracks().forEach((track) => track.stop());
-  }, [networkError]);
 
   useEffect(() => {
     const element = remoteVideoRef.current;
@@ -295,6 +301,37 @@ export function VideoRoom({
 
     return () => clearInterval(interval);
   }, [peerStatus, duelEnded, networkError, resetSamples, finishDuel]);
+
+  // --- Configuración ICE -----------------------------------------------------
+  if (iceError) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-6 px-4 py-12 text-center">
+        <WifiOff aria-hidden className="size-14 text-flex-400" />
+        <h1 className="text-2xl font-black uppercase tracking-tight text-white">
+          No pudimos preparar la sala
+        </h1>
+        <p role="alert" className="max-w-sm text-sm text-arena-300">
+          {iceError}
+        </p>
+        <button
+          type="button"
+          onClick={onLeave}
+          className="mt-2 rounded-lg bg-volt-500 px-8 py-4 text-sm font-black uppercase tracking-widest text-arena-950 transition-colors hover:bg-volt-400"
+        >
+          Volver a la cola
+        </button>
+      </div>
+    );
+  }
+
+  if (!iceReady) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-4 px-4 py-12 text-center">
+        <Loader2 aria-hidden className="size-8 animate-spin text-volt-400" />
+        <p className="text-sm text-arena-300">Preparando la sala…</p>
+      </div>
+    );
+  }
 
   // --- Pantalla de red caída -------------------------------------------------
   // Va antes que la de resultado: si el duelo ya terminó y la puntuación se

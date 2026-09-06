@@ -3,26 +3,22 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 
-import { buildIceServers } from "@/lib/webrtc/ice";
+import type { TurnResponse } from "@/app/api/turn/route";
 import { createClient } from "@/utils/supabase/client";
 
-/**
- * Configuración ICE. Las referencias a process.env tienen que ser literales
- * para que Next las inyecte en el bundle del navegador en tiempo de build.
- *
- * ADVERTENCIA DE SEGURIDAD: al ser NEXT_PUBLIC_*, la credencial del TURN viaja
- * al navegador en texto plano y cualquiera puede extraerla del bundle y usar el
- * servidor por su cuenta (te comes tú el ancho de banda). Para producción, lo
- * correcto son credenciales efímeras firmadas en el servidor (coturn con
- * `use-auth-secret` y HMAC con caducidad).
- */
-const { iceServers: ICE_SERVERS, turnEnabled: TURN_ENABLED } = buildIceServers({
-  urls: process.env.NEXT_PUBLIC_TURN_URLS,
-  username: process.env.NEXT_PUBLIC_TURN_USERNAME,
-  credential: process.env.NEXT_PUBLIC_TURN_CREDENTIAL,
-});
-
 const SIGNAL_EVENT = "signal";
+
+/**
+ * La configuración ICE ya no vive en el bundle: se pide a /api/turn, que
+ * autentica la sesión y firma credenciales efímeras con el secreto del
+ * servidor. Aquí nunca llega ningún secreto de larga duración.
+ */
+const TURN_ENDPOINT = "/api/turn";
+
+type IceState =
+  | { status: "loading" }
+  | { status: "ready"; iceServers: RTCIceServer[]; turnEnabled: boolean }
+  | { status: "error"; message: string };
 
 /**
  * `disconnected` en ICE suele ser un bache pasajero de red (wifi, cambio de
@@ -54,6 +50,13 @@ type UseWebRTCResult = {
   status: PeerStatus;
   /** Mensaje si la conexión se cae de forma irrecuperable; null si todo va bien. */
   networkError: string | null;
+  /**
+   * true cuando ya tenemos servidores ICE. Hasta entonces no se pide la cámara
+   * ni se crea la RTCPeerConnection: sin ICE la negociación no llegaría a nada.
+   */
+  iceReady: boolean;
+  /** Mensaje si /api/turn falló. */
+  iceError: string | null;
 };
 
 /**
@@ -72,13 +75,58 @@ export function useWebRTC({
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [status, setStatus] = useState<PeerStatus>("idle");
   const [networkError, setNetworkError] = useState<string | null>(null);
+  const [ice, setIce] = useState<IceState>({ status: "loading" });
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const channelRef = useRef<RealtimeChannel | null>(null);
 
+  // --- Credenciales ICE efímeras --------------------------------------------
+  useEffect(() => {
+    const controller = new AbortController();
+
+    const load = async () => {
+      try {
+        const response = await fetch(TURN_ENDPOINT, {
+          signal: controller.signal,
+          cache: "no-store",
+        });
+
+        if (!response.ok) {
+          throw new Error(`El servidor respondió ${response.status}`);
+        }
+
+        const data = (await response.json()) as TurnResponse;
+
+        if (!Array.isArray(data.iceServers) || data.iceServers.length === 0) {
+          throw new Error("Respuesta sin servidores ICE");
+        }
+
+        setIce({
+          status: "ready",
+          iceServers: data.iceServers,
+          turnEnabled: Boolean(data.turnEnabled),
+        });
+      } catch (error) {
+        if (controller.signal.aborted) return;
+
+        setIce({
+          status: "error",
+          message:
+            "No pudimos obtener la configuración de red para el duelo. Recarga la página.",
+        });
+        console.error("[webrtc] /api/turn falló:", error);
+      }
+    };
+
+    void load();
+
+    return () => controller.abort();
+  }, []);
+
   useEffect(() => {
     // Sin cámara no hay nada que negociar (permiso denegado, por ejemplo).
-    if (!localStream) return;
+    // Sin ICE tampoco: la negociación no encontraría ninguna ruta.
+    if (!localStream || ice.status !== "ready") return;
 
     let disposed = false;
     let negotiationStarted = false;
@@ -89,17 +137,17 @@ export function useWebRTC({
      */
     const pendingCandidates: RTCIceCandidateInit[] = [];
 
-    if (TURN_ENABLED) {
+    if (ice.turnEnabled) {
       console.info(
-        `Inicializando WebRTC con soporte TURN (${ICE_SERVERS.length} servidores ICE).`,
+        `Inicializando WebRTC con soporte TURN (${ice.iceServers.length} servidores ICE, credenciales efímeras).`,
       );
     } else {
       console.warn(
-        "Inicializando WebRTC solo con STUN: los usuarios tras NAT simétrico (redes móviles y corporativas) no podrán conectar. Configura NEXT_PUBLIC_TURN_URLS, NEXT_PUBLIC_TURN_USERNAME y NEXT_PUBLIC_TURN_CREDENTIAL.",
+        "Inicializando WebRTC solo con STUN: los usuarios tras NAT simétrico (redes móviles y corporativas) no podrán conectar. Configura TURN_URLS y TURN_SECRET en el servidor.",
       );
     }
 
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    const pc = new RTCPeerConnection({ iceServers: ice.iceServers });
     pcRef.current = pc;
 
     /** Timer de gracia para el estado `disconnected` de ICE. */
@@ -323,7 +371,13 @@ export function useWebRTC({
       setStatus("idle");
       setNetworkError(null);
     };
-  }, [supabase, matchId, userId, isInitiator, localStream]);
+  }, [supabase, matchId, userId, isInitiator, localStream, ice]);
 
-  return { remoteStream, status, networkError };
+  return {
+    remoteStream,
+    status,
+    networkError,
+    iceReady: ice.status === "ready",
+    iceError: ice.status === "error" ? ice.message : null,
+  };
 }
