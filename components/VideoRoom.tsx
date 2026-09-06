@@ -1,0 +1,287 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  CameraOff,
+  Loader2,
+  RefreshCw,
+  ShieldAlert,
+  Video,
+} from "lucide-react";
+
+type CameraState =
+  | { status: "requesting" }
+  | { status: "ready" }
+  | { status: "denied" }
+  | { status: "not-found" }
+  | { status: "in-use" }
+  | { status: "insecure" }
+  | { status: "error"; message: string };
+
+type VideoRoomProps = {
+  matchId: string;
+  isInitiator: boolean;
+  opponentUsername: string | null;
+  onLeave: () => void;
+};
+
+/** El navegador no expone mediaDevices fuera de un contexto seguro. */
+class InsecureContextError extends Error {}
+
+/** Traduce el DOMException de getUserMedia a un estado que sepamos explicar. */
+function mapCameraError(error: unknown): CameraState {
+  if (error instanceof InsecureContextError) return { status: "insecure" };
+
+  const name = error instanceof DOMException ? error.name : "";
+
+  switch (name) {
+    case "NotAllowedError":
+    case "SecurityError":
+      return { status: "denied" };
+    case "NotFoundError":
+    case "OverconstrainedError":
+      return { status: "not-found" };
+    case "NotReadableError":
+    case "AbortError":
+      return { status: "in-use" };
+    default:
+      return {
+        status: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Error desconocido con la cámara.",
+      };
+  }
+}
+
+const CAMERA_COPY: Record<
+  Exclude<CameraState["status"], "ready" | "requesting">,
+  { title: string; body: string }
+> = {
+  denied: {
+    title: "Necesitamos tu cámara para jugar",
+    body: "Has bloqueado el acceso. Pulsa el icono de la barra de direcciones, permite cámara y micrófono, y vuelve a intentarlo.",
+  },
+  "not-found": {
+    title: "No encontramos ninguna cámara",
+    body: "Conecta una webcam y vuelve a intentarlo. Sin vídeo no hay duelo.",
+  },
+  "in-use": {
+    title: "Tu cámara está ocupada",
+    body: "Otra aplicación la está usando (Zoom, Meet, OBS…). Ciérrala y reintenta.",
+  },
+  insecure: {
+    title: "Conexión no segura",
+    body: "El navegador solo da acceso a la cámara en HTTPS o en localhost. Abre la app en localhost o despliégala en Vercel.",
+  },
+  error: {
+    title: "No pudimos abrir la cámara",
+    body: "Ha ocurrido un error inesperado al pedir acceso a tu cámara.",
+  },
+};
+
+/**
+ * Sala del duelo.
+ *
+ * Fase 3: solo cámara local + maquetación. El WebRTC (offer/answer SDP, ICE y
+ * señalización por Supabase Realtime) y la cuenta atrás de 15 s llegan en la
+ * Fase 4; `isInitiator` ya viene resuelto para entonces.
+ */
+export function VideoRoom({
+  matchId,
+  isInitiator,
+  opponentUsername,
+  onLeave,
+}: VideoRoomProps) {
+  const [camera, setCamera] = useState<CameraState>({ status: "requesting" });
+  const [attempt, setAttempt] = useState(0);
+
+  const localVideoRef = useRef<HTMLVideoElement | null>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let stream: MediaStream | null = null;
+
+    // Copia local: en la limpieza el ref ya puede apuntar a otro nodo.
+    const localVideo = localVideoRef.current;
+
+    const requestCamera = async (): Promise<MediaStream> => {
+      // Fuera de un contexto seguro navigator.mediaDevices ni siquiera existe.
+      if (!navigator.mediaDevices?.getUserMedia)
+        throw new InsecureContextError();
+
+      return navigator.mediaDevices.getUserMedia({
+        video: {
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          facingMode: "user",
+        },
+        audio: true,
+      });
+    };
+
+    requestCamera()
+      .then((mediaStream) => {
+        if (cancelled) {
+          // El componente se desmontó mientras el usuario decidía: apagamos.
+          mediaStream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+
+        stream = mediaStream;
+        streamRef.current = mediaStream;
+
+        if (localVideo) {
+          localVideo.srcObject = mediaStream;
+        }
+
+        setCamera({ status: "ready" });
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) setCamera(mapCameraError(error));
+      });
+
+    return () => {
+      cancelled = true;
+
+      // Apagar TODAS las pistas: si no, la luz de la cámara se queda encendida.
+      stream?.getTracks().forEach((track) => track.stop());
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+
+      if (localVideo) {
+        localVideo.srcObject = null;
+      }
+    };
+  }, [attempt]);
+
+  const retryCamera = useCallback(() => {
+    setCamera({ status: "requesting" });
+    setAttempt((value) => value + 1);
+  }, []);
+
+  const cameraReady = camera.status === "ready";
+
+  return (
+    <div className="flex flex-1 flex-col gap-4 p-4">
+      <header className="flex flex-wrap items-center justify-between gap-3">
+        <div className="text-left">
+          <p className="text-xs uppercase tracking-widest text-arena-500">
+            Duelo · {matchId.slice(0, 8)}
+          </p>
+          <h1 className="text-lg font-black uppercase tracking-tight text-white">
+            Tú vs{" "}
+            <span className="text-volt-400">{opponentUsername ?? "Rival"}</span>
+          </h1>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <span className="rounded-full border border-arena-700 px-3 py-1 text-xs uppercase tracking-wider text-arena-300">
+            {isInitiator ? "Anfitrión" : "Invitado"}
+          </span>
+          <button
+            type="button"
+            onClick={onLeave}
+            className="rounded-lg border border-arena-700 px-3 py-1.5 text-xs font-semibold uppercase tracking-wider text-arena-300 transition-colors hover:border-flex-500/50 hover:text-flex-400"
+          >
+            Salir
+          </button>
+        </div>
+      </header>
+
+      <div className="grid flex-1 grid-cols-1 gap-4 md:grid-cols-2">
+        {/* --- Vídeo local --- */}
+        <section className="relative flex min-h-[38vh] items-center justify-center overflow-hidden rounded-2xl border border-arena-700/70 bg-arena-900 md:min-h-0">
+          <video
+            ref={localVideoRef}
+            autoPlay
+            playsInline
+            muted
+            className={`size-full -scale-x-100 object-cover transition-opacity ${
+              cameraReady ? "opacity-100" : "opacity-0"
+            }`}
+          />
+
+          {camera.status === "requesting" && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center">
+              <Loader2
+                aria-hidden
+                className="size-6 animate-spin text-volt-400"
+              />
+              <p className="text-sm text-arena-300">
+                Permite el acceso a la cámara y al micrófono…
+              </p>
+            </div>
+          )}
+
+          {!cameraReady && camera.status !== "requesting" && (
+            <div
+              role="alert"
+              className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center"
+            >
+              <ShieldAlert aria-hidden className="size-8 text-flex-400" />
+              <p className="text-sm font-bold text-white">
+                {CAMERA_COPY[camera.status].title}
+              </p>
+              <p className="max-w-xs text-xs text-arena-300">
+                {CAMERA_COPY[camera.status].body}
+              </p>
+              {camera.status === "error" && (
+                <p className="max-w-xs font-mono text-[11px] text-arena-500">
+                  {camera.message}
+                </p>
+              )}
+              <button
+                type="button"
+                onClick={retryCamera}
+                className="mt-1 flex items-center gap-2 rounded-lg bg-volt-500 px-4 py-2 text-xs font-black uppercase tracking-widest text-arena-950 transition-colors hover:bg-volt-400"
+              >
+                <RefreshCw aria-hidden className="size-3.5" />
+                Reintentar
+              </button>
+            </div>
+          )}
+
+          <span className="absolute bottom-3 left-3 rounded-md bg-arena-950/80 px-2 py-1 text-xs font-semibold uppercase tracking-wider text-volt-400">
+            Tú
+          </span>
+        </section>
+
+        {/* --- Vídeo remoto (Fase 4: WebRTC) --- */}
+        <section className="relative flex min-h-[38vh] items-center justify-center overflow-hidden rounded-2xl border border-arena-700/70 bg-arena-900 md:min-h-0">
+          {/* La Fase 4 asignará aquí el MediaStream remoto que llegue por WebRTC. */}
+          <video
+            ref={remoteVideoRef}
+            autoPlay
+            playsInline
+            className="absolute inset-0 size-full object-cover opacity-0"
+          />
+
+          <div className="relative flex flex-col items-center gap-3 px-6 text-center">
+            {cameraReady ? (
+              <Video aria-hidden className="size-8 text-arena-500" />
+            ) : (
+              <CameraOff aria-hidden className="size-8 text-arena-700" />
+            )}
+            <p className="text-sm text-arena-300">
+              Esperando el vídeo de{" "}
+              <span className="font-semibold text-white">
+                {opponentUsername ?? "tu rival"}
+              </span>
+            </p>
+            <p className="text-xs uppercase tracking-widest text-arena-500">
+              Fase 4 · conexión WebRTC
+            </p>
+          </div>
+
+          <span className="absolute bottom-3 left-3 rounded-md bg-arena-950/80 px-2 py-1 text-xs font-semibold uppercase tracking-wider text-arena-300">
+            {opponentUsername ?? "Rival"}
+          </span>
+        </section>
+      </div>
+    </div>
+  );
+}
