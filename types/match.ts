@@ -13,6 +13,8 @@ export type MatchRow = {
   player2_id: string;
   status: "active" | "completed";
   winner_id: string | null;
+  player1_score: number | null;
+  player2_score: number | null;
   created_at: string;
 };
 

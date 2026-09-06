@@ -8,10 +8,10 @@
     "prebuild": "node scripts/copy-mediapipe.mjs",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "node --test \"lib/**/*.test.ts\""
   },
   "dependencies": {
-    "@mediapipe/camera_utils": "^0.3.1675466862",
     "@mediapipe/pose": "^0.5.1675469404",
     "@supabase/ssr": "^0.12.6",
     "@supabase/supabase-js": "^2.115.0",

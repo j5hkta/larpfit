@@ -3,15 +3,23 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   CameraOff,
+  Crown,
   Loader2,
+  Minus,
   RefreshCw,
   ScanLine,
   ShieldAlert,
+  Skull,
   Video,
 } from "lucide-react";
 
+import { useMatchOutcome } from "@/hooks/useMatchOutcome";
 import { usePoseDetector } from "@/hooks/usePoseDetector";
 import { useWebRTC } from "@/hooks/useWebRTC";
+import { createClient } from "@/utils/supabase/client";
+
+/** Duración del duelo. */
+const DUEL_SECONDS = 15;
 
 type CameraState =
   | { status: "requesting" }
@@ -97,9 +105,8 @@ const CAMERA_COPY: Record<
 };
 
 /**
- * Sala del duelo: cámara local, conexión P2P con el rival y análisis de pose.
- *
- * Falta la cuenta atrás de 15 s y el veredicto del juez (Fase 5).
+ * Sala del duelo: cámara local, conexión P2P, 15 s de cronómetro, análisis de
+ * pose y veredicto del juez.
  */
 export function VideoRoom({
   matchId,
@@ -111,6 +118,10 @@ export function VideoRoom({
   const [camera, setCamera] = useState<CameraState>({ status: "requesting" });
   const [attempt, setAttempt] = useState(0);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+
+  const [remaining, setRemaining] = useState(DUEL_SECONDS);
+  const [duelEnded, setDuelEnded] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -205,11 +216,156 @@ export function VideoRoom({
   }, [remoteStream]);
 
   // --- Juez de IA (solo sobre nuestra propia cámara) ------------------------
-  const { status: poseStatus, torso } = usePoseDetector({
+  const {
+    status: poseStatus,
+    torso,
+    getScore,
+    resetSamples,
+  } = usePoseDetector({
     videoRef: localVideoRef,
     canvasRef: poseCanvasRef,
-    enabled: cameraReady,
+    // Al acabar el duelo dejamos de analizar: la cámara ya está apagada.
+    enabled: cameraReady && !duelEnded,
   });
+
+  // --- Veredicto ------------------------------------------------------------
+  const outcome = useMatchOutcome(matchId, userId, duelEnded);
+
+  /**
+   * Fin del duelo: apagar la cámara y enviar la puntuación.
+   *
+   * Solo mandamos nuestro número. El ganador lo decide submit_score() en el
+   * servidor; desde aquí es imposible declararse vencedor.
+   */
+  const finishDuel = useCallback(async () => {
+    const score = getScore();
+
+    // Apagar TODAS las pistas congela el vídeo y apaga la luz de la cámara.
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+
+    if (score === null) {
+      setSubmitError(
+        "No detectamos tu torso en ningún momento. El duelo se cierra sin puntuación.",
+      );
+      return;
+    }
+
+    const supabase = createClient();
+    const { error } = await supabase.rpc("submit_score", {
+      p_match_id: matchId,
+      p_score: Number(score.toFixed(3)),
+    });
+
+    if (error)
+      setSubmitError(`No pudimos enviar tu puntuación: ${error.message}`);
+  }, [getScore, matchId]);
+
+  // --- Cronómetro de 15 s ---------------------------------------------------
+  // Arranca solo cuando los dos están conectados de verdad.
+  useEffect(() => {
+    if (peerStatus !== "connected" || duelEnded) return;
+
+    resetSamples();
+    const startedAt = Date.now();
+
+    const interval = setInterval(() => {
+      const left = Math.max(
+        0,
+        DUEL_SECONDS - Math.floor((Date.now() - startedAt) / 1000),
+      );
+      setRemaining(left);
+
+      if (left === 0) {
+        clearInterval(interval);
+        setDuelEnded(true);
+        void finishDuel();
+      }
+    }, 200);
+
+    return () => clearInterval(interval);
+  }, [peerStatus, duelEnded, resetSamples, finishDuel]);
+
+  // --- Pantalla de resultado -------------------------------------------------
+  if (duelEnded) {
+    const won = outcome?.resolved && outcome.winnerId === userId;
+    const draw = outcome?.resolved && outcome.winnerId === null;
+
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-6 px-4 py-12 text-center">
+        {!outcome?.resolved ? (
+          <>
+            <Loader2
+              aria-hidden
+              className="size-10 animate-spin text-volt-400"
+            />
+            <h1 className="text-2xl font-black uppercase tracking-tight text-white">
+              Calculando resultados…
+            </h1>
+            <p className="max-w-sm text-sm text-arena-300">
+              {submitError ??
+                "El juez está comparando los dos torsos. Esperando a tu rival."}
+            </p>
+          </>
+        ) : (
+          <>
+            {won ? (
+              <Crown aria-hidden className="size-16 text-volt-400" />
+            ) : draw ? (
+              <Minus aria-hidden className="size-16 text-arena-300" />
+            ) : (
+              <Skull aria-hidden className="size-16 text-flex-400" />
+            )}
+
+            <h1
+              className={`text-5xl font-black uppercase tracking-tighter sm:text-7xl ${
+                won
+                  ? "text-volt-400"
+                  : draw
+                    ? "text-arena-300"
+                    : "text-flex-400"
+              }`}
+            >
+              {won ? "¡Ganaste!" : draw ? "Empate" : "Perdiste"}
+            </h1>
+
+            <div className="flex items-center gap-8 rounded-2xl border border-arena-700/70 bg-arena-900/80 px-8 py-5">
+              <div>
+                <p className="text-xs uppercase tracking-widest text-arena-500">
+                  Tu V-taper
+                </p>
+                <p className="font-mono text-3xl font-bold tabular-nums text-white">
+                  {outcome.myScore?.toFixed(2) ?? "—"}
+                </p>
+              </div>
+              <span className="text-lg font-black text-arena-700">VS</span>
+              <div>
+                <p className="text-xs uppercase tracking-widest text-arena-500">
+                  {opponentUsername ?? "Rival"}
+                </p>
+                <p className="font-mono text-3xl font-bold tabular-nums text-white">
+                  {outcome.opponentScore?.toFixed(2) ?? "—"}
+                </p>
+              </div>
+            </div>
+
+            {submitError && (
+              <p role="alert" className="max-w-sm text-xs text-flex-400">
+                {submitError}
+              </p>
+            )}
+          </>
+        )}
+
+        <button
+          type="button"
+          onClick={onLeave}
+          className="mt-4 rounded-lg bg-volt-500 px-8 py-4 text-sm font-black uppercase tracking-widest text-arena-950 transition-colors hover:bg-volt-400"
+        >
+          Buscar otro rival
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-1 flex-col gap-4 p-4">
@@ -223,6 +379,17 @@ export function VideoRoom({
             <span className="text-volt-400">{opponentUsername ?? "Rival"}</span>
           </h1>
         </div>
+
+        {peerStatus === "connected" && (
+          <div
+            aria-live="polite"
+            className={`font-mono text-5xl font-black tabular-nums ${
+              remaining <= 5 ? "text-flex-400" : "text-volt-400"
+            }`}
+          >
+            {String(remaining).padStart(2, "0")}
+          </div>
+        )}
 
         <div className="flex items-center gap-3">
           <span

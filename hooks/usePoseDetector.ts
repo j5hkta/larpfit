@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { RefObject } from "react";
 import type {
   NormalizedLandmarkList,
@@ -9,19 +9,14 @@ import type {
   Results,
 } from "@mediapipe/pose";
 
-/**
- * Índices de MediaPipe Pose que nos interesan para el V-taper.
- * @see https://google.github.io/mediapipe/solutions/pose
- */
-export const LANDMARK = {
-  LEFT_SHOULDER: 11,
-  RIGHT_SHOULDER: 12,
-  LEFT_HIP: 23,
-  RIGHT_HIP: 24,
-} as const;
-
-/** Confianza mínima por punto para dar la medición por buena. */
-const MIN_VISIBILITY = 0.6;
+import {
+  aggregateScore,
+  isPlausibleRatio,
+  LANDMARK,
+  measureTorso,
+  MIN_VISIBILITY,
+  type TorsoReading,
+} from "@/lib/judge/vtaper";
 
 /** Refrescos por segundo del estado de React (el dibujo va a 60 fps). */
 const STATE_UPDATE_MS = 250;
@@ -29,16 +24,20 @@ const STATE_UPDATE_MS = 250;
 /** Los assets los sirve public/mediapipe/pose (ver scripts/copy-mediapipe.mjs). */
 const MEDIAPIPE_BASE = "/mediapipe/pose";
 
-export type TorsoReading = {
-  /** Anchura de hombros normalizada (0-1 respecto al ancho del frame). */
-  shoulderWidth: number;
-  /** Anchura de cintura/caderas normalizada. */
-  waistWidth: number;
-  /** V-taper: hombros / cintura. Cuanto más alto, mejor. */
-  ratio: number;
-};
+export type { TorsoReading };
+export { LANDMARK };
 
 export type PoseStatus = "idle" | "loading" | "detecting" | "no-pose" | "error";
+
+type UsePoseDetectorResult = {
+  status: PoseStatus;
+  /** Lectura instantánea, para la UI en vivo. */
+  torso: TorsoReading | null;
+  /** Puntuación agregada del duelo. Se lee al terminar el cronómetro. */
+  getScore: () => number | null;
+  /** Vacía el acumulador al empezar un duelo nuevo. */
+  resetSamples: () => void;
+};
 
 type UsePoseDetectorArgs = {
   videoRef: RefObject<HTMLVideoElement | null>;
@@ -85,33 +84,6 @@ function loadPose(): Promise<PoseConstructor> {
   });
 
   return scriptPromise;
-}
-
-function isVisible(landmarks: NormalizedLandmarkList, index: number): boolean {
-  const point = landmarks[index];
-  return Boolean(point) && (point.visibility ?? 0) >= MIN_VISIBILITY;
-}
-
-function measureTorso(landmarks: NormalizedLandmarkList): TorsoReading | null {
-  const indices = [
-    LANDMARK.LEFT_SHOULDER,
-    LANDMARK.RIGHT_SHOULDER,
-    LANDMARK.LEFT_HIP,
-    LANDMARK.RIGHT_HIP,
-  ];
-
-  if (!indices.every((index) => isVisible(landmarks, index))) return null;
-
-  const shoulderWidth = Math.abs(
-    landmarks[LANDMARK.LEFT_SHOULDER].x - landmarks[LANDMARK.RIGHT_SHOULDER].x,
-  );
-  const waistWidth = Math.abs(
-    landmarks[LANDMARK.LEFT_HIP].x - landmarks[LANDMARK.RIGHT_HIP].x,
-  );
-
-  if (waistWidth <= 0.001) return null;
-
-  return { shoulderWidth, waistWidth, ratio: shoulderWidth / waistWidth };
 }
 
 function draw(
@@ -190,11 +162,16 @@ export function usePoseDetector({
   videoRef,
   canvasRef,
   enabled,
-}: UsePoseDetectorArgs): { status: PoseStatus; torso: TorsoReading | null } {
+}: UsePoseDetectorArgs): UsePoseDetectorResult {
   const [status, setStatus] = useState<PoseStatus>("idle");
   const [torso, setTorso] = useState<TorsoReading | null>(null);
 
   const lastStateUpdate = useRef(0);
+
+  /** Todas las lecturas válidas del duelo en curso. */
+  const samplesRef = useRef<number[]>([]);
+  /** Última lectura válida, por si no da tiempo a juntar muestras. */
+  const lastRatioRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!enabled) return;
@@ -241,6 +218,12 @@ export function usePoseDetector({
       }
 
       const reading = measureTorso(landmarks);
+
+      if (reading && isPlausibleRatio(reading.ratio)) {
+        samplesRef.current.push(reading.ratio);
+        lastRatioRef.current = reading.ratio;
+      }
+
       draw(canvas, landmarks, reading);
       publish(reading ? "detecting" : "no-pose", reading);
     };
@@ -310,10 +293,26 @@ export function usePoseDetector({
     };
   }, [enabled, videoRef, canvasRef]);
 
+  /**
+   * Puntuación final del jugador: mediana de las muestras del duelo.
+   * Devuelve null si nunca se detectó un torso completo.
+   */
+  const getScore = useCallback(
+    (): number | null =>
+      aggregateScore(samplesRef.current, lastRatioRef.current),
+    [],
+  );
+
+  /** Descarta lo acumulado. Se llama al arrancar cada duelo. */
+  const resetSamples = useCallback(() => {
+    samplesRef.current = [];
+    lastRatioRef.current = null;
+  }, []);
+
   // "loading" se deriva en vez de asignarse: React 19 no permite setState
   // síncrono en el cuerpo de un efecto.
   const effectiveStatus: PoseStatus =
     enabled && status === "idle" ? "loading" : status;
 
-  return { status: effectiveStatus, torso };
+  return { status: effectiveStatus, torso, getScore, resetSamples };
 }
