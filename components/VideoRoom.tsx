@@ -8,6 +8,7 @@ import {
   Minus,
   RefreshCw,
   ScanLine,
+  ScanSearch,
   ShieldAlert,
   Skull,
   Video,
@@ -16,11 +17,12 @@ import {
 
 import { useMatchOutcome } from "@/hooks/useMatchOutcome";
 import { usePoseDetector } from "@/hooks/usePoseDetector";
-import { usePushupDetector } from "@/hooks/usePushupDetector";
+import { useModularDetector } from "@/hooks/useModularDetector";
 import { useRepFeedback } from "@/hooks/useRepFeedback";
 import { useWebRTC } from "@/hooks/useWebRTC";
+import { exerciseDuration, findExercise } from "@/lib/exercises";
 import { gameModeInfo } from "@/lib/game-modes";
-import type { GameMode } from "@/types/match";
+import type { GameMode, PerformanceTier } from "@/types/match";
 import { createClient } from "@/utils/supabase/client";
 
 type CameraState =
@@ -38,6 +40,9 @@ type VideoRoomProps = {
   isInitiator: boolean;
   opponentUsername: string | null;
   gameMode: GameMode;
+  performanceTier: PerformanceTier | null;
+  /** Ejercicio salido del drafting. Null en Estética. */
+  exerciseId: string | null;
   onLeave: () => void;
 };
 
@@ -122,12 +127,20 @@ export function VideoRoom({
   isInitiator,
   opponentUsername,
   gameMode,
+  performanceTier,
+  exerciseId,
   onLeave,
 }: VideoRoomProps) {
-  // La disciplina define la duración y qué mide el juez.
   const mode = gameModeInfo(gameMode);
-  const duelSeconds = mode.durationSeconds;
   const isPerformance = gameMode === "performance";
+  const exercise = findExercise(exerciseId);
+
+  // En Rendimiento manda la duración del ejercicio sorteado (30 s o 60 s);
+  // en Estética, la de la disciplina.
+  const duelSeconds =
+    isPerformance && performanceTier
+      ? exerciseDuration(exerciseId, performanceTier)
+      : mode.durationSeconds;
 
   const [camera, setCamera] = useState<CameraState>({ status: "requesting" });
   const [attempt, setAttempt] = useState(0);
@@ -254,11 +267,14 @@ export function VideoRoom({
   // en cada repetición contada. Estas funciones sí son estables.
   const {
     reps: pushupReps,
-    phase: pushupPhase,
+    phase: repPhase,
+    labels: phaseLabels,
+    warning: framingWarning,
     processFrame: processPushupFrame,
     getReps: getPushupReps,
     reset: resetPushups,
-  } = usePushupDetector({
+  } = useModularDetector({
+    exerciseId,
     enabled: isPerformance && cameraReady && !duelEnded,
   });
 
@@ -456,7 +472,7 @@ export function VideoRoom({
             <div className="flex items-center gap-8 rounded-2xl border border-arena-700/70 bg-arena-900/80 px-8 py-5">
               <div>
                 <p className="text-xs uppercase tracking-widest text-arena-500">
-                  {isPerformance ? "Tus planchas" : "Tu V-taper"}
+                  {isPerformance ? "Tus repeticiones" : "Tu V-taper"}
                 </p>
                 <p className="font-mono text-3xl font-bold tabular-nums text-white">
                   {formatScore(outcome.myScore, isPerformance)}
@@ -497,7 +513,7 @@ export function VideoRoom({
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div className="text-left">
           <p className="text-xs uppercase tracking-widest text-arena-500">
-            {mode.name} · {matchId.slice(0, 8)}
+            {exercise?.name ?? mode.name} · {matchId.slice(0, 8)}
           </p>
           <h1 className="text-lg font-black uppercase tracking-tight text-white">
             Tú vs{" "}
@@ -605,6 +621,22 @@ export function VideoRoom({
             }`}
           />
 
+          {/* Encuadre incompleto: el detector no ve lo que necesita. */}
+          {isPerformance && framingWarning && !duelEnded && (
+            <div
+              role="alert"
+              className="pointer-events-none absolute inset-x-0 top-0 flex flex-col items-center gap-1 bg-gradient-to-b from-flex-500/35 to-transparent px-4 pb-8 pt-4 text-center"
+            >
+              <span className="flex animate-pulse items-center gap-2 text-sm font-black uppercase tracking-widest text-flex-400">
+                <ScanSearch aria-hidden className="size-4" />
+                Encuadre incompleto
+              </span>
+              <span className="text-xs font-semibold text-white/90">
+                {framingWarning}
+              </span>
+            </div>
+          )}
+
           {/* Destello de repetición válida, sincronizado con el sonido. */}
           {isPerformance && (
             <div
@@ -655,7 +687,7 @@ export function VideoRoom({
                 aria-live="polite"
                 aria-label={`${pushupReps} repeticiones`}
                 className={`font-mono text-7xl font-black leading-none tabular-nums transition-transform duration-150 sm:text-8xl ${
-                  pushupPhase === "down"
+                  repPhase === "active"
                     ? "scale-110 text-flex-400"
                     : "text-volt-400"
                 }`}
@@ -670,9 +702,9 @@ export function VideoRoom({
                     ? "Juez no disponible"
                     : poseStatus === "no-pose"
                       ? "No te vemos: ponte de perfil y de cuerpo entero"
-                      : pushupPhase === "down"
-                        ? "Abajo · sube del todo"
-                        : "Planchas"}
+                      : repPhase === "active"
+                        ? `${phaseLabels.active} · vuelve a ${phaseLabels.rest.toLowerCase()}`
+                        : (exercise?.name ?? "Repeticiones")}
               </span>
             </div>
           )}
