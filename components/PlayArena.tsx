@@ -5,7 +5,7 @@ import { useCallback, useState } from "react";
 import { Matchmaker } from "@/components/Matchmaker";
 import { ModeSelect } from "@/components/ModeSelect";
 import { primeAudio } from "@/lib/audio";
-import type { GameMode } from "@/types/match";
+import type { MatchSetup } from "@/types/match";
 
 /**
  * Orquesta el flujo de /play: primero se elige disciplina, después se entra a
@@ -20,7 +20,7 @@ type PlayArenaProps = {
 };
 
 export function PlayArena({ userId, username, country }: PlayArenaProps) {
-  const [mode, setMode] = useState<GameMode | null>(null);
+  const [setup, setSetup] = useState<MatchSetup | null>(null);
 
   /**
    * Elegir disciplina es el último gesto real del usuario antes del duelo, así
@@ -28,16 +28,16 @@ export function PlayArena({ userId, username, country }: PlayArenaProps) {
    * repetición, la política de autoplay del navegador lo bloquearía y no
    * sonaría nada.
    */
-  const selectMode = useCallback((selected: GameMode) => {
+  const selectMode = useCallback((selected: MatchSetup) => {
     primeAudio();
-    setMode(selected);
+    setSetup(selected);
   }, []);
 
   // Volver al selector saca al jugador de la cola: Matchmaker se desmonta y su
   // limpieza cierra el canal de Realtime.
-  const backToSelect = useCallback(() => setMode(null), []);
+  const backToSelect = useCallback(() => setSetup(null), []);
 
-  if (!mode) {
+  if (!setup) {
     return (
       <ModeSelect username={username} country={country} onSelect={selectMode} />
     );
@@ -45,11 +45,11 @@ export function PlayArena({ userId, username, country }: PlayArenaProps) {
 
   return (
     <Matchmaker
-      key={mode}
+      key={`${setup.gameMode}:${setup.performanceTier ?? "-"}:${setup.isMystery}`}
       userId={userId}
       username={username}
       country={country}
-      gameMode={mode}
+      setup={setup}
       onChangeMode={backToSelect}
     />
   );

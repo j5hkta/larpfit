@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 
 import { createClient } from "@/utils/supabase/client";
-import type { GameMode, MatchRow, MatchmakingState } from "@/types/match";
+import type { MatchRow, MatchSetup, MatchmakingState } from "@/types/match";
 
 /** Red de seguridad por si Realtime no entrega el INSERT (ms). */
 const POLL_INTERVAL_MS = 4000;
@@ -33,7 +33,7 @@ type UseMatchmakingResult = {
 export function useMatchmaking(
   userId: string,
   country: string,
-  gameMode: GameMode,
+  setup: MatchSetup,
 ): UseMatchmakingResult {
   const supabase = useMemo(() => createClient(), []);
   const [state, setState] = useState<MatchmakingState>({
@@ -55,10 +55,20 @@ export function useMatchmaking(
 
       const { data: match, error } = await supabase
         .from("matches")
-        .select("id, player1_id, player2_id, game_mode")
+        .select(
+          "id, player1_id, player2_id, game_mode, performance_tier, is_mystery",
+        )
         .eq("id", matchId)
         .single<
-          Pick<MatchRow, "id" | "player1_id" | "player2_id" | "game_mode">
+          Pick<
+            MatchRow,
+            | "id"
+            | "player1_id"
+            | "player2_id"
+            | "game_mode"
+            | "performance_tier"
+            | "is_mystery"
+          >
         >();
 
       if (error || !match) {
@@ -94,6 +104,8 @@ export function useMatchmaking(
           // El modo lo dicta la fila del match, no lo que eligió este cliente:
           // así ambos jugadores coinciden aunque uno tenga la UI desfasada.
           gameMode: match.game_mode,
+          performanceTier: match.performance_tier,
+          isMystery: match.is_mystery,
           isInitiator,
         },
       });
@@ -162,7 +174,9 @@ export function useMatchmaking(
 
         const { data, error } = await supabase.rpc("join_queue_or_match", {
           p_country: country,
-          p_game_mode: gameMode,
+          p_game_mode: setup.gameMode,
+          p_performance_tier: setup.performanceTier,
+          p_is_mystery: setup.isMystery,
         });
 
         if (cancelled) return;
@@ -187,7 +201,7 @@ export function useMatchmaking(
       void supabase.removeChannel(channel);
       channelRef.current = null;
     };
-  }, [supabase, userId, country, gameMode, attempt, resolveMatch]);
+  }, [supabase, userId, country, setup, attempt, resolveMatch]);
 
   // --- Red de seguridad: sondeo mientras buscamos ---------------------------
   // Si Realtime falla (réplica caída, publicación mal configurada, red del

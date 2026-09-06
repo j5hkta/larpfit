@@ -10,6 +10,19 @@
 /** Las dos disciplinas. Debe coincidir con el CHECK de 00004_game_modes.sql. */
 export type GameMode = "aesthetics" | "performance";
 
+/** Nivel del modo Rendimiento. Null en Estética. Ver 00006_drafting_phase.sql. */
+export type PerformanceTier = "normal" | "hard";
+
+/**
+ * Configuración elegida en el selector. Solo se empareja con quien haya
+ * escogido exactamente lo mismo.
+ */
+export type MatchSetup = {
+  gameMode: GameMode;
+  performanceTier: PerformanceTier | null;
+  isMystery: boolean;
+};
+
 export type MatchRow = {
   id: string;
   player1_id: string;
@@ -19,6 +32,13 @@ export type MatchRow = {
   player1_score: number | null;
   player2_score: number | null;
   game_mode: GameMode;
+  performance_tier: PerformanceTier | null;
+  is_mystery: boolean;
+  /** Las tres cartas que repartió el servidor. */
+  draft_options: string[] | null;
+  p1_vote: string | null;
+  p2_vote: string | null;
+  selected_exercise: string | null;
   created_at: string;
 };
 
@@ -28,6 +48,8 @@ export type ActiveMatch = {
   opponentUsername: string | null;
   /** Disciplina del duelo, tal como quedó registrada en el servidor. */
   gameMode: GameMode;
+  performanceTier: PerformanceTier | null;
+  isMystery: boolean;
   /**
    * player1 es siempre quien crea la oferta SDP. Se decide por la fila del
    * match y no por quién llegue antes, para que ambos clientes coincidan.

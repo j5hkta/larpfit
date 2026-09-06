@@ -3,11 +3,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { AlertCircle, Radar, Swords, XCircle } from "lucide-react";
 
+import { DraftingPhase } from "@/components/DraftingPhase";
 import { VideoRoom } from "@/components/VideoRoom";
 import { useMatchmaking } from "@/hooks/useMatchmaking";
 import { countryName } from "@/lib/countries";
 import { gameModeInfo } from "@/lib/game-modes";
-import type { GameMode } from "@/types/match";
+import { tierLabel } from "@/lib/exercises";
+import type { MatchSetup } from "@/types/match";
 
 /** Milisegundos que dejamos el cartel de "oponente encontrado" antes del duelo. */
 const REVEAL_MS = 2200;
@@ -16,7 +18,7 @@ type MatchmakerProps = {
   userId: string;
   username: string;
   country: string;
-  gameMode: GameMode;
+  setup: MatchSetup;
   /** Vuelve al selector de disciplina. */
   onChangeMode: () => void;
 };
@@ -25,18 +27,23 @@ export function Matchmaker({
   userId,
   username,
   country,
-  gameMode,
+  setup,
   onChangeMode,
 }: MatchmakerProps) {
-  const { state, cancel, retry } = useMatchmaking(userId, country, gameMode);
+  const { state, cancel, retry } = useMatchmaking(userId, country, setup);
 
   const [elapsed, setElapsed] = useState(0);
   const [enteredRoom, setEnteredRoom] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  /** Ejercicio salido del drafting. Null en estética o mientras se vota. */
+  const [exerciseId, setExerciseId] = useState<string | null>(null);
 
   const searching = state.status === "searching";
   const region = countryName(country) ?? country;
-  const mode = gameModeInfo(gameMode);
+  const mode = gameModeInfo(setup.gameMode);
+  const tierSuffix = setup.performanceTier
+    ? ` · ${tierLabel(setup.performanceTier)}${setup.isMystery ? " misterioso" : ""}`
+    : "";
 
   // Cronómetro de búsqueda. El tiempo se deriva del instante de arranque, así
   // no hace falta tocar el estado en el cuerpo del efecto.
@@ -72,8 +79,30 @@ export function Matchmaker({
 
   const handleRetry = useCallback(() => {
     setEnteredRoom(false);
+    setExerciseId(null);
     retry();
   }, [retry]);
+
+  // --- Fase de selección (solo Rendimiento) ---------------------------------
+  const needsDraft =
+    state.status === "found" &&
+    enteredRoom &&
+    state.match.gameMode === "performance" &&
+    exerciseId === null;
+
+  if (needsDraft && state.status === "found" && state.match.performanceTier) {
+    return (
+      <DraftingPhase
+        matchId={state.match.id}
+        userId={userId}
+        performanceTier={state.match.performanceTier}
+        isMystery={state.match.isMystery}
+        opponentUsername={state.match.opponentUsername}
+        onReady={setExerciseId}
+        onLeave={handleRetry}
+      />
+    );
+  }
 
   // --- Duelo en marcha -------------------------------------------------------
   if (state.status === "found" && enteredRoom) {
@@ -84,6 +113,8 @@ export function Matchmaker({
         isInitiator={state.match.isInitiator}
         opponentUsername={state.match.opponentUsername}
         gameMode={state.match.gameMode}
+        performanceTier={state.match.performanceTier}
+        exerciseId={exerciseId}
         onLeave={handleRetry}
       />
     );
@@ -133,7 +164,8 @@ export function Matchmaker({
             Búsqueda cancelada
           </h1>
           <p className="mt-3 text-sm text-arena-300">
-            Ya no estás en la cola de {mode.name} en {region}.
+            Ya no estás en la cola de {mode.name}
+            {tierSuffix} en {region}.
           </p>
           <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
             <button
@@ -164,7 +196,8 @@ export function Matchmaker({
               : "Buscando oponente…"}
           </h1>
           <p className="mt-3 text-sm text-arena-300">
-            {mode.name} · Región{" "}
+            {mode.name}
+            {tierSuffix} · Región{" "}
             <span className="font-semibold text-white">{region}</span>
           </p>
 
