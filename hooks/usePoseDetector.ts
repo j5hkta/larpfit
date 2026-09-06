@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { RefObject } from "react";
 import type {
+  LandmarkConnectionArray,
   NormalizedLandmarkList,
   Pose as PoseInstance,
   PoseConfig,
@@ -14,15 +15,33 @@ import {
   isPlausibleRatio,
   LANDMARK,
   measureTorso,
-  MIN_VISIBILITY,
   type TorsoReading,
 } from "@/lib/judge/vtaper";
+import {
+  classifyConnection,
+  type ConnectionGroup,
+  FACE_MAX_INDEX,
+  GROUP_STYLE,
+} from "@/lib/pose/skeleton";
 
 /** Refrescos por segundo del estado de React (el dibujo va a 60 fps). */
 const STATE_UPDATE_MS = 250;
 
 /** Los assets los sirve public/mediapipe/pose (ver scripts/copy-mediapipe.mjs). */
 const MEDIAPIPE_BASE = "/mediapipe/pose";
+
+/**
+ * Umbral de confianza SOLO para pintar. Es más permisivo que el del juez
+ * (MIN_VISIBILITY) para que el esqueleto se vea completo aunque una muñeca
+ * entre y salga. La puntuación sigue usando el umbral estricto: esto no toca
+ * la medición.
+ */
+const DRAW_MIN_VISIBILITY = 0.5;
+
+/** Paleta del escáner. */
+const SCAN = "34, 211, 238"; // cian neón
+const VOLT = "#d4ff3f"; // línea de hombros
+const FLEX = "#ff3d7f"; // línea de caderas
 
 export type { TorsoReading };
 export { LANDMARK };
@@ -51,6 +70,8 @@ type PoseConstructor = new (config?: PoseConfig) => PoseInstance;
 declare global {
   interface Window {
     Pose?: PoseConstructor;
+    /** pose.js publica aquí los 35 pares de conexiones del esqueleto. */
+    POSE_CONNECTIONS?: LandmarkConnectionArray;
   }
 }
 
@@ -86,6 +107,83 @@ function loadPose(): Promise<PoseConstructor> {
   return scriptPromise;
 }
 
+/**
+ * Las conexiones oficiales de MediaPipe (35 pares). Las publica el propio
+ * pose.js en el global, así que no hace falta duplicar la lista aquí.
+ */
+let cachedConnections: LandmarkConnectionArray | null = null;
+
+function poseConnections(): LandmarkConnectionArray {
+  cachedConnections ??= window.POSE_CONNECTIONS ?? [];
+  return cachedConnections;
+}
+
+type Point = { x: number; y: number };
+
+/**
+ * Traza los segmentos dos veces: una estela ancha y translúcida debajo y una
+ * línea fina y brillante encima. Da el halo de neón sin usar `shadowBlur`,
+ * que a 30 fps sobre 1280x720 hunde el frame rate.
+ */
+function strokeGlow(
+  ctx: CanvasRenderingContext2D,
+  segments: readonly [Point, Point][],
+  rgb: string,
+  alpha: number,
+  width: number,
+): void {
+  if (segments.length === 0) return;
+
+  const path = new Path2D();
+  for (const [from, to] of segments) {
+    path.moveTo(from.x, from.y);
+    path.lineTo(to.x, to.y);
+  }
+
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+
+  ctx.strokeStyle = `rgba(${rgb}, ${alpha * 0.22})`;
+  ctx.lineWidth = width * 3.5;
+  ctx.stroke(path);
+
+  ctx.strokeStyle = `rgba(${rgb}, ${alpha})`;
+  ctx.lineWidth = width;
+  ctx.stroke(path);
+}
+
+function highlightLine(
+  ctx: CanvasRenderingContext2D,
+  from: Point,
+  to: Point,
+  color: string,
+  width: number,
+): void {
+  ctx.lineCap = "round";
+
+  ctx.globalAlpha = 0.25;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width * 3;
+  ctx.beginPath();
+  ctx.moveTo(from.x, from.y);
+  ctx.lineTo(to.x, to.y);
+  ctx.stroke();
+
+  ctx.globalAlpha = 1;
+  ctx.lineWidth = width;
+  ctx.beginPath();
+  ctx.moveTo(from.x, from.y);
+  ctx.lineTo(to.x, to.y);
+  ctx.stroke();
+}
+
+/**
+ * Esqueleto completo estilo escáner: las 33 articulaciones y sus 35 conexiones
+ * en cian, con los hombros (11-12) y las caderas (23-24) resaltados para que se
+ * vea qué está midiendo el juez.
+ *
+ * Solo pinta. No calcula ni agrega nada.
+ */
 function draw(
   canvas: HTMLCanvasElement,
   landmarks: NormalizedLandmarkList,
@@ -97,20 +195,70 @@ function draw(
   const { width, height } = canvas;
   ctx.clearRect(0, 0, width, height);
 
-  const point = (index: number) => ({
+  // Los grosores se escalan con la resolución: a 480p y a 1080p debe verse igual.
+  const scale = Math.max(0.6, Math.max(width, height) / 1280);
+
+  const visible = (index: number): boolean =>
+    (landmarks[index]?.visibility ?? 0) >= DRAW_MIN_VISIBILITY;
+
+  const point = (index: number): Point => ({
     x: landmarks[index].x * width,
     y: landmarks[index].y * height,
   });
 
-  // Esqueleto completo, discreto.
-  ctx.fillStyle = "rgba(255, 255, 255, 0.45)";
-  for (const landmark of landmarks) {
-    if ((landmark.visibility ?? 0) < MIN_VISIBILITY) continue;
+  // --- Relleno del torso: la zona que se evalúa ---------------------------
+  if (torso) {
+    const quad = [
+      LANDMARK.LEFT_SHOULDER,
+      LANDMARK.RIGHT_SHOULDER,
+      LANDMARK.RIGHT_HIP,
+      LANDMARK.LEFT_HIP,
+    ].map(point);
+
     ctx.beginPath();
-    ctx.arc(landmark.x * width, landmark.y * height, 3, 0, Math.PI * 2);
+    ctx.moveTo(quad[0].x, quad[0].y);
+    for (const corner of quad.slice(1)) ctx.lineTo(corner.x, corner.y);
+    ctx.closePath();
+    ctx.fillStyle = `rgba(${SCAN}, 0.08)`;
     ctx.fill();
   }
 
+  // --- Conexiones, agrupadas por zona -------------------------------------
+  const grouped: Record<ConnectionGroup, [Point, Point][]> = {
+    face: [],
+    limb: [],
+    torso: [],
+  };
+
+  for (const [a, b] of poseConnections()) {
+    if (!visible(a) || !visible(b)) continue;
+    grouped[classifyConnection(a, b)].push([point(a), point(b)]);
+  }
+
+  for (const group of ["torso", "face", "limb"] as const) {
+    const style = GROUP_STYLE[group];
+    strokeGlow(ctx, grouped[group], SCAN, style.alpha, style.width * scale);
+  }
+
+  // --- Articulaciones ------------------------------------------------------
+  for (let index = 0; index < landmarks.length; index += 1) {
+    if (!visible(index)) continue;
+
+    const joint = point(index);
+    const radius = (index <= FACE_MAX_INDEX ? 1.8 : 3) * scale;
+
+    ctx.beginPath();
+    ctx.arc(joint.x, joint.y, radius * 2.2, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(${SCAN}, 0.18)`;
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(joint.x, joint.y, radius, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(${SCAN}, 0.95)`;
+    ctx.fill();
+  }
+
+  // --- Lo que mide el juez, por encima de todo ----------------------------
   if (!torso) return;
 
   const leftShoulder = point(LANDMARK.LEFT_SHOULDER);
@@ -118,36 +266,26 @@ function draw(
   const leftHip = point(LANDMARK.LEFT_HIP);
   const rightHip = point(LANDMARK.RIGHT_HIP);
 
-  // Cuadrilátero del torso: lo que mide el juez.
-  ctx.beginPath();
-  ctx.moveTo(leftShoulder.x, leftShoulder.y);
-  ctx.lineTo(rightShoulder.x, rightShoulder.y);
-  ctx.lineTo(rightHip.x, rightHip.y);
-  ctx.lineTo(leftHip.x, leftHip.y);
-  ctx.closePath();
-  ctx.fillStyle = "rgba(184, 240, 0, 0.12)";
-  ctx.fill();
+  highlightLine(ctx, leftShoulder, rightShoulder, VOLT, 5 * scale);
+  highlightLine(ctx, leftHip, rightHip, FLEX, 4 * scale);
 
-  // Línea de hombros.
-  ctx.strokeStyle = "#d4ff3f";
-  ctx.lineWidth = 4;
-  ctx.beginPath();
-  ctx.moveTo(leftShoulder.x, leftShoulder.y);
-  ctx.lineTo(rightShoulder.x, rightShoulder.y);
-  ctx.stroke();
-
-  // Línea de cintura.
-  ctx.strokeStyle = "#ff3d7f";
-  ctx.beginPath();
-  ctx.moveTo(leftHip.x, leftHip.y);
-  ctx.lineTo(rightHip.x, rightHip.y);
-  ctx.stroke();
-
-  ctx.fillStyle = "#ffffff";
-  for (const anchor of [leftShoulder, rightShoulder, leftHip, rightHip]) {
+  ctx.globalAlpha = 1;
+  for (const [anchor, color] of [
+    [leftShoulder, VOLT],
+    [rightShoulder, VOLT],
+    [leftHip, FLEX],
+    [rightHip, FLEX],
+  ] as const) {
     ctx.beginPath();
-    ctx.arc(anchor.x, anchor.y, 6, 0, Math.PI * 2);
+    ctx.arc(anchor.x, anchor.y, 5 * scale, 0, Math.PI * 2);
+    ctx.fillStyle = "#ffffff";
     ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(anchor.x, anchor.y, 5 * scale, 0, Math.PI * 2);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2 * scale;
+    ctx.stroke();
   }
 }
 
