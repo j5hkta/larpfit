@@ -22,6 +22,7 @@ import { useRepFeedback } from "@/hooks/useRepFeedback";
 import { useWebRTC } from "@/hooks/useWebRTC";
 import { exerciseDuration, findExercise } from "@/lib/exercises";
 import { gameModeInfo } from "@/lib/game-modes";
+import { formatScore } from "@/lib/leaderboard";
 import type { GameMode, PerformanceTier } from "@/types/match";
 import { createClient } from "@/utils/supabase/client";
 
@@ -54,12 +55,6 @@ const PEER_COPY: Record<string, string> = {
   disconnected: "Reconectando…",
   failed: "Conexión de red fallida o rival desconectado.",
 };
-
-/** Las planchas son enteros; el V-taper, un ratio con dos decimales. */
-function formatScore(score: number | null, isPerformance: boolean): string {
-  if (score === null) return "—";
-  return isPerformance ? String(Math.round(score)) : score.toFixed(2);
-}
 
 /** El navegador no expone mediaDevices fuera de un contexto seguro. */
 class InsecureContextError extends Error {}
@@ -475,7 +470,7 @@ export function VideoRoom({
                   {isPerformance ? "Tus repeticiones" : "Tu V-taper"}
                 </p>
                 <p className="font-mono text-3xl font-bold tabular-nums text-white">
-                  {formatScore(outcome.myScore, isPerformance)}
+                  {formatScore(outcome.myScore, gameMode)}
                 </p>
               </div>
               <span className="text-lg font-black text-arena-700">VS</span>
@@ -484,7 +479,7 @@ export function VideoRoom({
                   {opponentUsername ?? "Rival"}
                 </p>
                 <p className="font-mono text-3xl font-bold tabular-nums text-white">
-                  {formatScore(outcome.opponentScore, isPerformance)}
+                  {formatScore(outcome.opponentScore, gameMode)}
                 </p>
               </div>
             </div>

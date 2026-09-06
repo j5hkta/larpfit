@@ -2,7 +2,39 @@ import { redirect } from "next/navigation";
 import { Dumbbell } from "lucide-react";
 
 import { AuthForm } from "@/components/auth/auth-form";
+import { Leaderboard } from "@/components/Leaderboard";
+import {
+  LEADERBOARD_SIZE,
+  type LeaderboardEntry,
+  normalizeEntries,
+} from "@/lib/leaderboard";
+import type { GameMode } from "@/types/match";
 import { createClient } from "@/utils/supabase/server";
+
+type SupabaseServerClient = Awaited<ReturnType<typeof createClient>>;
+
+/**
+ * Clasificación de una disciplina.
+ *
+ * Si falla (migración sin aplicar, base caída) devolvemos lista vacía: la
+ * portada tiene que seguir dejando entrar aunque la tabla no cargue.
+ */
+async function fetchLeaderboard(
+  supabase: SupabaseServerClient,
+  mode: GameMode,
+): Promise<LeaderboardEntry[]> {
+  const { data, error } = await supabase.rpc("get_global_leaderboard", {
+    p_game_mode: mode,
+    p_limit: LEADERBOARD_SIZE,
+  });
+
+  if (error) {
+    console.error(`[leaderboard] ${mode}:`, error.message);
+    return [];
+  }
+
+  return normalizeEntries(data);
+}
 
 export default async function Home({ searchParams }: PageProps<"/">) {
   const supabase = await createClient();
@@ -15,13 +47,23 @@ export default async function Home({ searchParams }: PageProps<"/">) {
     redirect("/play");
   }
 
+  // Se piden en paralelo y en el servidor: la tabla llega ya pintada en el
+  // HTML, sin spinner ni salto de layout en la primera carga.
+  const [aesthetics, performance] = await Promise.all([
+    fetchLeaderboard(supabase, "aesthetics"),
+    fetchLeaderboard(supabase, "performance"),
+  ]);
+
   const params = await searchParams;
   const rawError = params.error;
   const initialError = Array.isArray(rawError) ? rawError[0] : rawError;
 
   return (
     <main className="relative flex flex-1 flex-col items-center justify-center overflow-hidden px-4 py-12">
-      <div className="arena-glow arena-grid pointer-events-none absolute inset-0" aria-hidden />
+      <div
+        className="arena-glow arena-grid pointer-events-none absolute inset-0"
+        aria-hidden
+      />
 
       <header className="relative mb-8 flex flex-col items-center text-center">
         <div className="mb-4 flex size-14 items-center justify-center rounded-2xl border border-volt-500/40 bg-volt-500/10">
@@ -37,8 +79,9 @@ export default async function Home({ searchParams }: PageProps<"/">) {
         </p>
       </header>
 
-      <div className="relative flex w-full justify-center">
+      <div className="relative flex w-full flex-col items-center gap-8">
         <AuthForm initialError={initialError} />
+        <Leaderboard aesthetics={aesthetics} performance={performance} />
       </div>
     </main>
   );
