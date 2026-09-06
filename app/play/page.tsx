@@ -1,7 +1,7 @@
 import { LogOut, UserX } from "lucide-react";
 
 import { logout } from "@/app/auth/actions";
-import { Matchmaker } from "@/components/Matchmaker";
+import { PlayArena } from "@/components/PlayArena";
 import { createClient } from "@/utils/supabase/server";
 
 export default async function PlayPage() {
@@ -30,7 +30,7 @@ export default async function PlayPage() {
 
       <div className="relative flex flex-1 flex-col">
         {canPlay && user && profile ? (
-          <Matchmaker
+          <PlayArena
             userId={user.id}
             username={profile.username}
             country={profile.country as string}
@@ -42,8 +42,8 @@ export default async function PlayPage() {
               Tu perfil está incompleto
             </h1>
             <p className="mt-3 max-w-sm text-sm text-arena-300">
-              No encontramos tu región, y sin ella no podemos emparejarte. Cierra
-              sesión y vuelve a crear la cuenta eligiendo un país.
+              No encontramos tu región, y sin ella no podemos emparejarte.
+              Cierra sesión y vuelve a crear la cuenta eligiendo un país.
             </p>
           </div>
         )}

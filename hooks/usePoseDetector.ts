@@ -63,6 +63,12 @@ type UsePoseDetectorArgs = {
   canvasRef: RefObject<HTMLCanvasElement | null>;
   /** Solo arrancamos cuando hay cámara lista. */
   enabled: boolean;
+  /**
+   * Recibe los landmarks crudos de cada fotograma. Lo usa el juez de
+   * rendimiento para alimentar su máquina de estados sin montar una segunda
+   * instancia de MediaPipe.
+   */
+  onLandmarks?: (landmarks: NormalizedLandmarkList | undefined) => void;
 };
 
 type PoseConstructor = new (config?: PoseConfig) => PoseInstance;
@@ -300,6 +306,7 @@ export function usePoseDetector({
   videoRef,
   canvasRef,
   enabled,
+  onLandmarks,
 }: UsePoseDetectorArgs): UsePoseDetectorResult {
   const [status, setStatus] = useState<PoseStatus>("idle");
   const [torso, setTorso] = useState<TorsoReading | null>(null);
@@ -310,6 +317,15 @@ export function usePoseDetector({
   const samplesRef = useRef<number[]>([]);
   /** Última lectura válida, por si no da tiempo a juntar muestras. */
   const lastRatioRef = useRef<number | null>(null);
+
+  /**
+   * El callback vive en un ref para que cambiar su identidad no reinicie
+   * MediaPipe: recargar el modelo wasm a mitad de duelo sería catastrófico.
+   */
+  const onLandmarksRef = useRef(onLandmarks);
+  useEffect(() => {
+    onLandmarksRef.current = onLandmarks;
+  }, [onLandmarks]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -348,6 +364,10 @@ export function usePoseDetector({
       }
 
       const landmarks = results.poseLandmarks;
+
+      // Los consumidores externos reciben el fotograma tal cual, incluso vacío:
+      // que no se detecte pose también es información para la FSM.
+      onLandmarksRef.current?.(landmarks);
 
       if (!landmarks || landmarks.length === 0) {
         canvas.getContext("2d")?.clearRect(0, 0, canvas.width, canvas.height);

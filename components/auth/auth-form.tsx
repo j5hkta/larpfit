@@ -73,7 +73,10 @@ export function AuthForm({ initialError }: { initialError?: string }) {
           })}
         </div>
 
-        <form action={isLogin ? loginAction : signupAction} className="space-y-4">
+        <form
+          action={isLogin ? loginAction : signupAction}
+          className="space-y-4"
+        >
           <div>
             <label htmlFor="email" className={labelClass}>
               Correo

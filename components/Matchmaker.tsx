@@ -6,6 +6,8 @@ import { AlertCircle, Radar, Swords, XCircle } from "lucide-react";
 import { VideoRoom } from "@/components/VideoRoom";
 import { useMatchmaking } from "@/hooks/useMatchmaking";
 import { countryName } from "@/lib/countries";
+import { gameModeInfo } from "@/lib/game-modes";
+import type { GameMode } from "@/types/match";
 
 /** Milisegundos que dejamos el cartel de "oponente encontrado" antes del duelo. */
 const REVEAL_MS = 2200;
@@ -14,10 +16,19 @@ type MatchmakerProps = {
   userId: string;
   username: string;
   country: string;
+  gameMode: GameMode;
+  /** Vuelve al selector de disciplina. */
+  onChangeMode: () => void;
 };
 
-export function Matchmaker({ userId, username, country }: MatchmakerProps) {
-  const { state, cancel, retry } = useMatchmaking(userId, country);
+export function Matchmaker({
+  userId,
+  username,
+  country,
+  gameMode,
+  onChangeMode,
+}: MatchmakerProps) {
+  const { state, cancel, retry } = useMatchmaking(userId, country, gameMode);
 
   const [elapsed, setElapsed] = useState(0);
   const [enteredRoom, setEnteredRoom] = useState(false);
@@ -25,6 +36,7 @@ export function Matchmaker({ userId, username, country }: MatchmakerProps) {
 
   const searching = state.status === "searching";
   const region = countryName(country) ?? country;
+  const mode = gameModeInfo(gameMode);
 
   // Cronómetro de búsqueda. El tiempo se deriva del instante de arranque, así
   // no hace falta tocar el estado en el cuerpo del efecto.
@@ -71,6 +83,7 @@ export function Matchmaker({ userId, username, country }: MatchmakerProps) {
         userId={userId}
         isInitiator={state.match.isInitiator}
         opponentUsername={state.match.opponentUsername}
+        gameMode={state.match.gameMode}
         onLeave={handleRetry}
       />
     );
@@ -120,15 +133,24 @@ export function Matchmaker({ userId, username, country }: MatchmakerProps) {
             Búsqueda cancelada
           </h1>
           <p className="mt-3 text-sm text-arena-300">
-            Ya no estás en la cola de {region}.
+            Ya no estás en la cola de {mode.name} en {region}.
           </p>
-          <button
-            type="button"
-            onClick={handleRetry}
-            className="mt-8 rounded-lg bg-volt-500 px-6 py-3 text-sm font-black uppercase tracking-widest text-arena-950 transition-colors hover:bg-volt-400"
-          >
-            Buscar de nuevo
-          </button>
+          <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
+            <button
+              type="button"
+              onClick={handleRetry}
+              className="rounded-lg bg-volt-500 px-6 py-3 text-sm font-black uppercase tracking-widest text-arena-950 transition-colors hover:bg-volt-400"
+            >
+              Buscar de nuevo
+            </button>
+            <button
+              type="button"
+              onClick={onChangeMode}
+              className="rounded-lg border border-arena-700 px-6 py-3 text-xs font-semibold uppercase tracking-wider text-arena-300 transition-colors hover:border-volt-500/50 hover:text-white"
+            >
+              Cambiar de disciplina
+            </button>
+          </div>
         </>
       ) : (
         <>
@@ -142,7 +164,8 @@ export function Matchmaker({ userId, username, country }: MatchmakerProps) {
               : "Buscando oponente…"}
           </h1>
           <p className="mt-3 text-sm text-arena-300">
-            Región: <span className="font-semibold text-white">{region}</span>
+            {mode.name} · Región{" "}
+            <span className="font-semibold text-white">{region}</span>
           </p>
 
           {searching && (

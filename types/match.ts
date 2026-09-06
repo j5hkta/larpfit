@@ -7,6 +7,9 @@
  * Hasta entonces esto refleja a mano el esquema de 00001_initial_schema.sql.
  */
 
+/** Las dos disciplinas. Debe coincidir con el CHECK de 00004_game_modes.sql. */
+export type GameMode = "aesthetics" | "performance";
+
 export type MatchRow = {
   id: string;
   player1_id: string;
@@ -15,6 +18,7 @@ export type MatchRow = {
   winner_id: string | null;
   player1_score: number | null;
   player2_score: number | null;
+  game_mode: GameMode;
   created_at: string;
 };
 
@@ -22,6 +26,8 @@ export type ActiveMatch = {
   id: string;
   opponentId: string;
   opponentUsername: string | null;
+  /** Disciplina del duelo, tal como quedó registrada en el servidor. */
+  gameMode: GameMode;
   /**
    * player1 es siempre quien crea la oferta SDP. Se decide por la fila del
    * match y no por quién llegue antes, para que ambos clientes coincidan.

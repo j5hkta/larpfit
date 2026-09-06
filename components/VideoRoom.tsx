@@ -16,11 +16,12 @@ import {
 
 import { useMatchOutcome } from "@/hooks/useMatchOutcome";
 import { usePoseDetector } from "@/hooks/usePoseDetector";
+import { usePushupDetector } from "@/hooks/usePushupDetector";
+import { useRepFeedback } from "@/hooks/useRepFeedback";
 import { useWebRTC } from "@/hooks/useWebRTC";
+import { gameModeInfo } from "@/lib/game-modes";
+import type { GameMode } from "@/types/match";
 import { createClient } from "@/utils/supabase/client";
-
-/** Duración del duelo. */
-const DUEL_SECONDS = 15;
 
 type CameraState =
   | { status: "requesting" }
@@ -36,6 +37,7 @@ type VideoRoomProps = {
   userId: string;
   isInitiator: boolean;
   opponentUsername: string | null;
+  gameMode: GameMode;
   onLeave: () => void;
 };
 
@@ -47,6 +49,12 @@ const PEER_COPY: Record<string, string> = {
   disconnected: "Reconectando…",
   failed: "Conexión de red fallida o rival desconectado.",
 };
+
+/** Las planchas son enteros; el V-taper, un ratio con dos decimales. */
+function formatScore(score: number | null, isPerformance: boolean): string {
+  if (score === null) return "—";
+  return isPerformance ? String(Math.round(score)) : score.toFixed(2);
+}
 
 /** El navegador no expone mediaDevices fuera de un contexto seguro. */
 class InsecureContextError extends Error {}
@@ -113,13 +121,19 @@ export function VideoRoom({
   userId,
   isInitiator,
   opponentUsername,
+  gameMode,
   onLeave,
 }: VideoRoomProps) {
+  // La disciplina define la duración y qué mide el juez.
+  const mode = gameModeInfo(gameMode);
+  const duelSeconds = mode.durationSeconds;
+  const isPerformance = gameMode === "performance";
+
   const [camera, setCamera] = useState<CameraState>({ status: "requesting" });
   const [attempt, setAttempt] = useState(0);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
 
-  const [remaining, setRemaining] = useState(DUEL_SECONDS);
+  const [remaining, setRemaining] = useState(duelSeconds);
   const [duelEnded, setDuelEnded] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
@@ -233,6 +247,24 @@ export function VideoRoom({
   }, [remoteStream]);
 
   // --- Juez de IA (solo sobre nuestra propia cámara) ------------------------
+  // El juez de rendimiento consume los mismos fotogramas que el de estética:
+  // una sola instancia de MediaPipe alimenta a los dos.
+  // Se desestructura a propósito: el hook devuelve un objeto nuevo en cada
+  // render, y meterlo entero en las dependencias del cronómetro lo reiniciaría
+  // en cada repetición contada. Estas funciones sí son estables.
+  const {
+    reps: pushupReps,
+    phase: pushupPhase,
+    processFrame: processPushupFrame,
+    getReps: getPushupReps,
+    reset: resetPushups,
+  } = usePushupDetector({
+    enabled: isPerformance && cameraReady && !duelEnded,
+  });
+
+  // Campanita + destello en cada repetición válida.
+  const { isFlashing } = useRepFeedback(pushupReps);
+
   const {
     status: poseStatus,
     torso,
@@ -243,6 +275,7 @@ export function VideoRoom({
     canvasRef: poseCanvasRef,
     // Al acabar el duelo dejamos de analizar: la cámara ya está apagada.
     enabled: cameraReady && !duelEnded,
+    onLandmarks: processPushupFrame,
   });
 
   // --- Veredicto ------------------------------------------------------------
@@ -255,7 +288,9 @@ export function VideoRoom({
    * servidor; desde aquí es imposible declararse vencedor.
    */
   const finishDuel = useCallback(async () => {
-    const score = getScore();
+    // Rendimiento envía repeticiones enteras (0 incluido); estética envía la
+    // mediana del V-taper, que puede ser null si nunca se detectó el torso.
+    const score = isPerformance ? getPushupReps() : getScore();
 
     // Apagar TODAS las pistas congela el vídeo y apaga la luz de la cámara.
     streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -275,7 +310,7 @@ export function VideoRoom({
 
     if (error)
       setSubmitError(`No pudimos enviar tu puntuación: ${error.message}`);
-  }, [getScore, matchId]);
+  }, [getScore, getPushupReps, isPerformance, matchId]);
 
   // --- Cronómetro de 15 s ---------------------------------------------------
   // Arranca solo cuando los dos están conectados de verdad.
@@ -283,12 +318,13 @@ export function VideoRoom({
     if (peerStatus !== "connected" || duelEnded || networkError) return;
 
     resetSamples();
+    resetPushups();
     const startedAt = Date.now();
 
     const interval = setInterval(() => {
       const left = Math.max(
         0,
-        DUEL_SECONDS - Math.floor((Date.now() - startedAt) / 1000),
+        duelSeconds - Math.floor((Date.now() - startedAt) / 1000),
       );
       setRemaining(left);
 
@@ -300,7 +336,15 @@ export function VideoRoom({
     }, 200);
 
     return () => clearInterval(interval);
-  }, [peerStatus, duelEnded, networkError, resetSamples, finishDuel]);
+  }, [
+    peerStatus,
+    duelEnded,
+    networkError,
+    duelSeconds,
+    resetSamples,
+    resetPushups,
+    finishDuel,
+  ]);
 
   // --- Configuración ICE -----------------------------------------------------
   if (iceError) {
@@ -382,7 +426,9 @@ export function VideoRoom({
             </h1>
             <p className="max-w-sm text-sm text-arena-300">
               {submitError ??
-                "El juez está comparando los dos torsos. Esperando a tu rival."}
+                (isPerformance
+                  ? "El juez está comparando las repeticiones. Esperando a tu rival."
+                  : "El juez está comparando los dos torsos. Esperando a tu rival.")}
             </p>
           </>
         ) : (
@@ -410,10 +456,10 @@ export function VideoRoom({
             <div className="flex items-center gap-8 rounded-2xl border border-arena-700/70 bg-arena-900/80 px-8 py-5">
               <div>
                 <p className="text-xs uppercase tracking-widest text-arena-500">
-                  Tu V-taper
+                  {isPerformance ? "Tus planchas" : "Tu V-taper"}
                 </p>
                 <p className="font-mono text-3xl font-bold tabular-nums text-white">
-                  {outcome.myScore?.toFixed(2) ?? "—"}
+                  {formatScore(outcome.myScore, isPerformance)}
                 </p>
               </div>
               <span className="text-lg font-black text-arena-700">VS</span>
@@ -422,7 +468,7 @@ export function VideoRoom({
                   {opponentUsername ?? "Rival"}
                 </p>
                 <p className="font-mono text-3xl font-bold tabular-nums text-white">
-                  {outcome.opponentScore?.toFixed(2) ?? "—"}
+                  {formatScore(outcome.opponentScore, isPerformance)}
                 </p>
               </div>
             </div>
@@ -451,7 +497,7 @@ export function VideoRoom({
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div className="text-left">
           <p className="text-xs uppercase tracking-widest text-arena-500">
-            Duelo · {matchId.slice(0, 8)}
+            {mode.name} · {matchId.slice(0, 8)}
           </p>
           <h1 className="text-lg font-black uppercase tracking-tight text-white">
             Tú vs{" "}
@@ -559,11 +605,21 @@ export function VideoRoom({
             }`}
           />
 
+          {/* Destello de repetición válida, sincronizado con el sonido. */}
+          {isPerformance && (
+            <div
+              aria-hidden
+              className={`pointer-events-none absolute inset-0 bg-volt-400/25 transition-opacity duration-150 ${
+                isFlashing ? "opacity-100" : "opacity-0"
+              }`}
+            />
+          )}
+
           <span className="absolute bottom-3 left-3 rounded-md bg-arena-950/80 px-2 py-1 text-xs font-semibold uppercase tracking-wider text-volt-400">
             Tú
           </span>
 
-          {cameraReady && (
+          {cameraReady && !isPerformance && (
             <div
               aria-live="polite"
               className="absolute bottom-3 right-3 flex items-center gap-2 rounded-md bg-arena-950/85 px-2.5 py-1.5 text-xs"
@@ -589,6 +645,35 @@ export function VideoRoom({
                       : "Ponte de cuerpo entero"}
                 </span>
               )}
+            </div>
+          )}
+
+          {/* Rendimiento: contador gigante sobre el propio vídeo. */}
+          {cameraReady && isPerformance && (
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-col items-center pb-4">
+              <span
+                aria-live="polite"
+                aria-label={`${pushupReps} repeticiones`}
+                className={`font-mono text-7xl font-black leading-none tabular-nums transition-transform duration-150 sm:text-8xl ${
+                  pushupPhase === "down"
+                    ? "scale-110 text-flex-400"
+                    : "text-volt-400"
+                }`}
+                style={{ textShadow: "0 0 24px rgba(0,0,0,0.85)" }}
+              >
+                {pushupReps}
+              </span>
+              <span className="mt-1 text-center text-xs font-bold uppercase tracking-widest text-white/80">
+                {poseStatus === "loading"
+                  ? "Cargando el juez…"
+                  : poseStatus === "error"
+                    ? "Juez no disponible"
+                    : poseStatus === "no-pose"
+                      ? "No te vemos: ponte de perfil y de cuerpo entero"
+                      : pushupPhase === "down"
+                        ? "Abajo · sube del todo"
+                        : "Planchas"}
+              </span>
             </div>
           )}
         </section>
