@@ -1,26 +1,65 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+/**
+ * Larpfit — tema oscuro fijo (gamer/fitness).
+ * No hay modo claro: la app se ve igual en todos los dispositivos.
+ */
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
+@theme {
+  --color-arena-950: #05060a;
+  --color-arena-900: #0a0c14;
+  --color-arena-850: #10131f;
+  --color-arena-800: #161a29;
+  --color-arena-700: #232840;
+  --color-arena-500: #4b5378;
+  --color-arena-300: #9aa2c4;
+
+  --color-volt-400: #d4ff3f;
+  --color-volt-500: #b8f000;
+  --color-volt-600: #94c000;
+
+  --color-flex-400: #ff3d7f;
+  --color-flex-500: #e60f5c;
+
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+:root {
+  color-scheme: dark;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background-color: var(--color-arena-950);
+  color: #e8ebf7;
+  font-family: var(--font-sans), system-ui, sans-serif;
+}
+
+/* Resplandor de fondo de la arena */
+.arena-glow {
+  background-image:
+    radial-gradient(
+      55rem 40rem at 15% -10%,
+      color-mix(in oklab, var(--color-volt-500) 14%, transparent),
+      transparent
+    ),
+    radial-gradient(
+      45rem 35rem at 90% 110%,
+      color-mix(in oklab, var(--color-flex-500) 16%, transparent),
+      transparent
+    );
+}
+
+/* Rejilla sutil tipo ring de combate */
+.arena-grid {
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+  background-size: 3rem 3rem;
+}
+
+/* El foco tiene que verse: contraste alto sobre fondo casi negro */
+:focus-visible {
+  outline: 2px solid var(--color-volt-400);
+  outline-offset: 2px;
 }
